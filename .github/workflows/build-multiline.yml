@@ -1,0 +1,199 @@
+name: Build Multiline Installer
+# 分支构建 / 预发布打包专用工作流（多行候选布局 feature/multiline-candidate）。
+# 与 .github/workflows/ci.yml 的 build job 等价，差异只有：
+#   1) 触发方式收敛到 feature 分支与 multiline-* 标签，并且不绑定 rime/weasel 仓库名；
+#   2) 只保留 msbuild 变体（xmake 变体见 docs/BUILD-multiline.md 的本机构建章节）；
+#   3) 增加 output/ 打包素材与 output/archives 目录的存在性检查（见步骤内注释）；
+#   4) 不跑 ci.yml 的集成测试步骤（TestWeaselUpgrade.ps1 会真实安装输入法并改动语言设置）。
+# 所有构建命令本身（install_boost.bat / build.bat data / build.bat arm64 installer /
+# get-rime.ps1 -use dev / bundled WinSparkle）与 ci.yml 逐字一致。
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: '要构建的分支名 / 标签 / 完整 commit SHA'
+        required: false
+        default: 'feature/multiline-candidate'
+        type: string
+  push:
+    branches:
+      - feature/multiline-candidate
+    tags:
+      - 'multiline-*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-multiline-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-2022
+    env:
+      boost_version: 1.84.0
+      BOOST_ROOT: ${{ github.workspace }}\deps\boost_1_84_0
+      SDKVER: 10.0.19041.0
+    steps:
+      # inputs.ref 为空时 actions/checkout 回落到 github.ref（push 事件即当前分支/标签）
+      - name: Resolve checkout ref
+        id: ref
+        shell: bash
+        env:
+          INPUT_REF: ${{ inputs.ref }}
+        run: echo "ref=$INPUT_REF" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.ref.outputs.ref }}
+          submodules: true
+          fetch-depth: 0
+
+      - name: Fetch all tags
+        run: git fetch --tags
+
+      - name: Configure build environment
+        shell: bash
+        run: |
+          cp env.vs2022.bat env.bat
+          echo git_ref_name="$(git describe --always)" >> $GITHUB_ENV
+
+      - name: Cache Boost
+        id: cache-boost
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.BOOST_ROOT }}
+          key: ${{ runner.os }}-boost-${{ env.boost_version }}
+
+      - name: Install Boost
+        if: steps.cache-boost.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          ./install_boost.bat
+          ./build.bat boost arm64
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          sdk: ${{ env.SDKVER }}
+
+      # bundled winsparkle v0.9.2 to disable auto open ReleaseNoteUrl in default browser
+      - name: cache bundled winsparkle
+        id: cache-winsparkle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}\winsparkle\x64\Release\WinSparkle.dll
+            ${{ github.workspace }}\winsparkle\x64\Release\WinSparkle.lib
+            ${{ github.workspace }}\winsparkle\Release\WinSparkle.dll
+            ${{ github.workspace }}\winsparkle\Release\WinSparkle.lib
+          key: ${{ runner.os }}-winsparkle-v0.9.2-bundled
+          restore-keys: |
+            winsparkle-v0.9.2-bundled
+
+      - name: Build bundled winsparkle
+        if: steps.cache-winsparkle.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (Test-Path winsparkle) { Remove-Item -Recurse -Force winsparkle }
+          # Clone winsparkle repo v0.9.2
+          git clone https://github.com/vslavik/winsparkle.git -b v0.9.2 --depth 1
+          cd winsparkle
+          git submodule update --init --recursive
+          copy ..\bundled_winsparkle.patch .
+          git apply bundled_winsparkle.patch
+          nuget restore
+          msbuild -m -t:Build -p:Configuration=Release -p:Platform=x64 WinSparkle.sln
+          msbuild -m -t:Build -p:Configuration=Release -p:Platform=Win32 WinSparkle.sln
+
+      - name: Install WinSparkle files
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          copy .\winsparkle\x64\Release\WinSparkle.dll .\output\
+          copy .\winsparkle\x64\Release\WinSparkle.lib .\lib64\
+          copy .\winsparkle\Release\WinSparkle.dll .\output\Win32\
+          copy .\winsparkle\Release\WinSparkle.lib .\lib\
+
+      - name: Get Rime files
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          .\get-rime.ps1 -use dev
+
+      - name: Build data
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          .\build.bat data
+
+      # NSIS 的 File 指令会逐个打开 output 下的这些素材，缺一个 makensis 就失败。
+      # 若本分支是从过滤过的快照建立的，这几个被 .gitignore 命中、但上游用 git add -f
+      # 强制纳入版本库的文件会缺失；这里只补齐真正缺失的文件，仓库内容齐全时是 no-op。
+      - name: Ensure installer payload files
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path output\archives | Out-Null
+          $base = 'https://raw.githubusercontent.com/rime/weasel/master/output/'
+          foreach ($f in @('7z.exe', '7-zip-license.txt', 'COPYING-curl.txt', 'curl.exe',
+                           'rime-install-config.bat', 'start_service.bat', 'stop_service.bat')) {
+            if (-not (Test-Path "output\$f")) {
+              Write-Host "restoring output\$f from upstream"
+              Invoke-WebRequest -Uri ($base + $f) -OutFile "output\$f"
+            }
+          }
+
+      # build.bat 硬编码 "%ProgramFiles(x86)%\NSIS\Bin\makensis.exe"。GitHub 托管的
+      # windows-2022 runner 预装了 NSIS；自托管 runner 缺失时退回仓库自带的 install_nsis.bat。
+      - name: Check NSIS
+        shell: pwsh
+        run: |
+          $makensis = Join-Path ${env:ProgramFiles(x86)} 'NSIS\Bin\makensis.exe'
+          if (-not (Test-Path $makensis)) {
+            Write-Host "makensis not found at $makensis - running install_nsis.bat"
+            cmd /c .\install_nsis.bat
+            if ($LASTEXITCODE -ne 0) { throw "install_nsis.bat failed" }
+          }
+          if (-not (Test-Path $makensis)) { throw "NSIS is required at $makensis by build.bat" }
+          & $makensis /VERSION
+
+      - name: Build Weasel
+        shell: pwsh
+        env:
+          RELEASE_BUILD: ${{ (startsWith(github.ref, 'refs/tags/')) && '1' || '' }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          .\build.bat arm64 installer
+          Get-ChildItem .\output\archives
+
+      - name: Compress Debug Symbols
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          output\7z.exe a -t7z "./output/archives/debug_symbols.7z" "output/*.pdb" -r
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: weasel-multiline-${{ env.git_ref_name }}
+          if-no-files-found: error
+          path: |
+            .\output\archives\weasel*.exe
+            .\output\archives\debug_symbols.7z
+
+      # 仅 multiline-* 标签触发；不依赖 CHANGELOG 与 tag 同名，所以不调用 extract_changelog.ps1
+      # （ci.yml 用它是因为上游 tag 必须与 CHANGELOG 顶部条目一致）。
+      - name: Release (pre-release)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          prerelease: true
+          generate_release_notes: true
+          files: |
+            ./output/archives/weasel*.exe
+            ./output/archives/debug_symbols.7z
