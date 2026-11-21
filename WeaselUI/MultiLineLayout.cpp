@@ -136,6 +136,12 @@ void MultiLineLayout::DoLayout() {
   // 翻页指示符尺寸
   int pgw = 0, pgh = 0;
   _CalcPageIndicator(false, pgw, pgh);
+  // 行焦点多行模式不需要 "< >" 翻页指示符, 连预留宽度一并去掉
+  if (_style.multiline_row_focus &&
+      _style.layout_type == UIStyle::LAYOUT_HORIZONTAL_MULTILINE) {
+    pgw = 0;
+    pgh = 0;
+  }
 
   /* Preedit */
   if (!IsInlinePreedit() && !_context.preedit.str.empty()) {
@@ -153,7 +159,7 @@ void MultiLineLayout::DoLayout() {
   const int area_top = height;
   // 翻页指示符排在候选区右侧, 需要预留宽度
   const bool show_page =
-      _pageEnabled && candidates_count && !_style.inline_preedit;
+      _pageEnabled && candidates_count && !_style.inline_preedit && pgw > 0;
   const int page_reserve = show_page ? (pgw + _style.candidate_spacing) : 0;
   // 行间距不小于上下高亮内边距的两倍, 避免相邻行的高亮块粘连
   const int row_gap =

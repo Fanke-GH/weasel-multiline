@@ -577,7 +577,10 @@ bool WeaselPanel::_DrawPreedit(const Text& text, bool isPreedit) {
 
       _TextOut(rcText, t.c_str(), t.length(), m_style.text_color, pTextFormat);
     }
+    // 行焦点多行模式下翻页完全由 '.' / ',' 接管, 右侧 "< >" 指示符
+    // 既无用途也占宽度, 不再绘制(布局侧同步不预留宽度)。
     if (m_candidateCount && !m_style.inline_preedit &&
+        m_ctx.cinfo.focus_per_row <= 0 &&
         COLORNOTTRANSPARENT(m_style.prevpage_color) &&
         COLORNOTTRANSPARENT(m_style.nextpage_color)) {
       const std::wstring pre = L"<";

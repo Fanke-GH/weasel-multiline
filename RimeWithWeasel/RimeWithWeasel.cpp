@@ -275,7 +275,9 @@ BOOL RimeWithWeaselHandler::ProcessKeyEvent(KeyEvent keyEvent,
 
   // macOS 式行焦点候选: 数字键与翻页键由本层接管, 不交给 librime 的默认 selector
   if (_HandleRowFocusKey(keyEvent, ipc_id, session_status)) {
-    _SyncRowFocusState(ipc_id, session_status);
+    // 本层已接管按键, 状态机自行维护 last_preedit / last_page_no。
+    // 不再调用 _SyncRowFocusState: 它会在 librime 内部状态抖动时把
+    // "preedit 变化" 误判为编码输入, 从而收起面板并把焦点归零。
     _Respond(ipc_id, eat);
     _UpdateUI(ipc_id);
     m_active_session = ipc_id;
@@ -358,9 +360,10 @@ bool RimeWithWeaselHandler::_HandleRowFocusKey(
   if (keyEvent.mask & ibus::RELEASE_MASK)
     return true;
 
+  RowFocusState& rf = session_status.row_focus;
   RIME_STRUCT(RimeContext, ctx);
   if (!rime_api->get_context(session_id, &ctx))
-    return false;  // 会话异常: 交回 librime 正常处理
+    return rf.expanded;  // 会话异常: 展开时仍吞掉, 避免 '.' 污染编码
   const int num = (int)ctx.menu.num_candidates;
   const int page_no = ctx.menu.page_no;
   const bool is_last = !!ctx.menu.is_last_page;
@@ -368,18 +371,30 @@ bool RimeWithWeaselHandler::_HandleRowFocusKey(
                                    ? u8tow(ctx.composition.preedit)
                                    : std::wstring();
   rime_api->free_context(&ctx);
-  // 没有候选时放行给 librime: 否则 '.'/',' 等标点键与数字键会被误吞,
-  // 导致中文状态下打不出标点 / 数字。
-  if (num <= 0)
-    return false;
 
-  RowFocusState& rf = session_status.row_focus;
+  // 关键修复: 面板一旦展开, 翻页/数字键一律由本层吞掉, 绝不交回 librime。
+  // 之前 num<=0 时无条件放行, 会让 '.'/',' 被 librime 吃进 preedit,
+  // 进而触发"编码变化 -> 收起面板 + 焦点归零"(实测第三次按 '.' 收起的根因)。
+  // 仅在从未展开、且确实没有候选时才放行, 保证中文状态下仍能打标点/数字。
+  if (num <= 0)
+    return rf.expanded;
+
   const int per_row =
       style.multiline_count_per_row < 9 ? style.multiline_count_per_row : 9;
-  const int rows = (num + per_row - 1) / per_row;
+  // 行数以配置的 max_rows 为上限, 避免 librime 返回的候选数抖动时
+  // 焦点可移动范围跟着变化
+  int rows = (num + per_row - 1) / per_row;
+  if (rows < 1)
+    rows = 1;
+  const int max_rows =
+      style.multiline_max_rows > 0 ? style.multiline_max_rows : rows;
+  if (rows > max_rows)
+    rows = max_rows;
   rf.has_state = true;
   rf.last_preedit = preedit;
   rf.last_page_no = page_no;
+  LOG(INFO) << "RowFocus key=" << kc << " num=" << num << " rows=" << rows
+            << " expanded=" << rf.expanded << " focus=" << rf.focus_row;
 
   // 行焦点模式下数字键是「行内序号」, 0 没有对应位置, 直接吞掉
   if (kind == K_ZERO)
