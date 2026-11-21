@@ -25,6 +25,7 @@ compile_commands.json
 /output/WeaselLanguageProfile.ps1
 /output/*.txt
 /output/*.bat
+!/output/rime-install.bat
 /output/data/essay.txt
 /output/data/opencc/
 /output/data/*.yaml

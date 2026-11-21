@@ -288,6 +288,13 @@ rem ---------------------------------------------------------------------------
 :build_data
   copy %WEASEL_ROOT%\LICENSE.txt output\
   copy %WEASEL_ROOT%\README.md output\README.txt
+  rem plum is an optional submodule. Source snapshots without gitlinks have no plum/
+  rem directory; output\rime-install.bat is shipped in the repository instead, so
+  rem there is nothing to fetch here (WEASEL_BUNDLED_RECIPES is empty in CI anyway).
+  if not exist "%WEASEL_ROOT%\plum\rime-install.bat" (
+    echo [build_data] plum submodule not present, skip bundled recipes
+    exit /b 0
+  )
   copy %WEASEL_ROOT%\plum\rime-install.bat output\
   set plum_dir=plum
   set rime_dir=output/data
