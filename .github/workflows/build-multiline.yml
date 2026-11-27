@@ -123,7 +123,15 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          .\get-rime.ps1 -use dev
+          # Pin to librime 1.17.0: its assets are named rime-33e7814-Windows-msvc-*.7z,
+          # which matches the hash-only pattern in get-rime.ps1. Newer releases (1.18.0+)
+          # use version strings like rime-1.18.0-*.7z that do NOT match; the script then
+          # silently skips the download, leaving output\data\opencc empty and causing
+          # build.bat's :build_opencc_data to recurse into itself (batch recursion crash).
+          .\get-rime.ps1 -use dev -tag 1.17.0
+          if (-not (Get-ChildItem output\data\opencc\TSCharacters.ocd* -ErrorAction SilentlyContinue)) {
+            throw 'opencc data missing after get-rime.ps1 - check the pinned tag and asset names'
+          }
 
       - name: Build data
         shell: pwsh
