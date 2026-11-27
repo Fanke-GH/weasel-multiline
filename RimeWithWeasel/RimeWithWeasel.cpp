@@ -414,11 +414,15 @@ bool RimeWithWeaselHandler::_HandleRowFocusKey(
 
   const bool down = (kind == K_DOWN);
   if (!rf.expanded) {
-    // 第一次按向下翻页键: 展开多行候选面板, 焦点落在首行
+    // 第一次按向下翻页键: 展开多行候选面板, 焦点直接下移到第二行首个候选。
+    // 展开即「进入选词」, 焦点行才有序号(label_mode=focus_only), 因此第一行
+    // 不再显示数字序号; 用户不必再多按一次 '.' 才能开始选第二行。
+    // 候选不足两行时退回首行, 避免高亮下标越界。
     if (down) {
       rf.expanded = true;
-      rf.focus_row = 0;
-      rime_api->highlight_candidate_on_current_page(session_id, 0);
+      rf.focus_row = rows > 1 ? 1 : 0;
+      rime_api->highlight_candidate_on_current_page(
+          session_id, (size_t)(rf.focus_row * per_row));
     }
     // 未展开时按向上: 不做动作
     return true;
